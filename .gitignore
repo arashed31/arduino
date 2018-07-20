@@ -1,8 +1,8 @@
 .dropbox
+*.bin
 *.ini
 *.txt
 *.xlsx
 *.zip
 libraries/
-*/*.bin
-*/wifi.h
+wifi.h
