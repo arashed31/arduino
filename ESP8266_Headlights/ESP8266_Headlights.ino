@@ -1,35 +1,39 @@
-#include <WiFiUdp.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266HTTPUpdateServer.h>
+#include <ESP8266mDNS.h>
 #include <NeoPixelBus.h>
+#include <WiFiUdp.h>
 #include "headlight.h"
 #include "wifi.h"
 
 /* ========================== NeoPixel  Section ============================= */
-RgbColor amber(192, 50, 0);
+RgbColor amber(160, 40, 0);
 RgbColor amberDim(40, 16, 0);
 RgbColor white(100, 80, 80);
 RgbColor red(120, 0, 0);
-RgbColor orange(140, 48, 0);
-RgbColor yellow(80, 80, 0);
-RgbColor green(0, 100, 0);
-RgbColor blue(0, 0, 128);
-RgbColor purple(120, 0, 100);
+RgbColor orange(120, 40, 0);
+RgbColor yellow(80, 70, 0);
+RgbColor green(0, 96, 0);
+RgbColor blue(0, 0, 160);
+RgbColor purple(100, 0, 80);
 RgbColor black(0);
 
 volatile uint32_t hexcolor;
+volatile int headlightReboot;
 volatile unsigned long turning;
 
-const int cornerLength = 18;
+const int cornerLength = 16;
 volatile int cornerStripShow;
 NeoPixelBus<NeoGrbFeature, NeoEsp8266Dma800KbpsMethod> cornerStrip(cornerLength);
-RgbColor cornerColor = amber;
+RgbColor cornerColor = amberDim;
 
+#ifdef HALO
 const int haloLength = 37;
 volatile int haloStripShow;
 NeoPixelBus<NeoGrbFeature, NeoEsp8266Uart800KbpsMethod> haloStrip(haloLength);
-RgbColor haloColor = amberDim;
+RgbColor haloColor = black;
+#endif
 
 /* Synchronize Corner Strip with turn signal */
 void turnISR() {
@@ -41,25 +45,32 @@ void turnISR() {
     for (i = 0; i < cornerLength; i++) {
       cornerStrip.SetPixelColor(i, black);
     }
+#ifdef HALO
     for (i = 0; i < haloLength; i++) {
       haloStrip.SetPixelColor(i, amberDim);
     }
+#endif
   }
   /* if turn signal just turned on */
   else {
     for (i = 0; i < cornerLength; i++) {
       cornerStrip.SetPixelColor(i, amber);
     }
+#ifdef HALO
     for (i = 0; i < haloLength; i++) {
       haloStrip.SetPixelColor(i, amber);
     }
+#endif
   }
   cornerStripShow = 1;
+#ifdef HALO
   haloStripShow = 1;
+#endif
 }
 
 /* Counter-Sync Halo Strip with low beam */
 void lowISR() {
+#ifdef HALO
   int i;
   int lowEdge = digitalRead(lowPin);
   /* if low beam just turned off */
@@ -75,6 +86,7 @@ void lowISR() {
     }
   }
   haloStripShow = 1;
+#endif
 }
 
 /* Turn on Strips at startup */
@@ -89,7 +101,9 @@ void turnLightsOn() {
 
 void updateColors() {
   cornerColor = RgbColor(HtmlColor(hexcolor));
+#ifdef HALO
   haloColor = RgbColor(HtmlColor(hexcolor));
+#endif
   turnLightsOn();
 }
 
@@ -122,6 +136,7 @@ void handleColorRGB() {
   hexcolor = (r << 16) | (g << 8) | b;
 
   httpServer.send(200, "text/plain", "ok");
+  //handleRoot();
 
   updateColors();
 }
@@ -132,6 +147,7 @@ void handleColorHEX() {
   hexcolor = strtol(colorBuffer, NULL, 16);
 
   httpServer.send(200, "text/plain", "ok");
+  //handleRoot();
 
   updateColors();
 }
@@ -151,83 +167,83 @@ void handleGayCorner() {
   cornerStrip.SetPixelColor(11, green);
   cornerStrip.SetPixelColor(12, blue);
   cornerStrip.SetPixelColor(13, blue);
-  cornerStrip.SetPixelColor(14, blue);
+  cornerStrip.SetPixelColor(14, purple);
   cornerStrip.SetPixelColor(15, purple);
-  cornerStrip.SetPixelColor(16, purple);
-  cornerStrip.SetPixelColor(17, purple);
   cornerStripShow = 1;
 
   httpServer.send(200, "text/plain", "ok");
+  //handleRoot();
 }
 
 void handleNotFound() {
-  String message = "File Not Found\n\n";
-  message += "URI: ";
-  message += httpServer.uri();
-  message += "\nMethod: ";
-  message += (httpServer.method() == HTTP_GET) ? "GET" : "POST";
-  message += "\nArguments: ";
-  message += httpServer.args();
-  message += "\n";
+  String message = "<html><head><title>404</title>";
+  message += "<meta http-equiv=\"refresh\" content=\"3; URL=/\"></head><body><p>";
+  message += "File Not Found<br /><br />";
+  message += "URI: " + httpServer.uri();
+  message += " <br /> Method: " + httpServer.method();
+  message += " <br /> Arguments: " + httpServer.args();
   for (uint8_t i = 0; i < httpServer.args(); i++) {
-    message += " " + httpServer.argName(i) + ": " + httpServer.arg(i) + "\n";
+    message += "<br /> &nbsp;&nbsp;" + httpServer.argName(i) + ": " + httpServer.arg(i);
   }
-  httpServer.send(404, "text/plain", message);
-  //Serial.print(message);
+  message += "<b /></p></body></html>";
+  httpServer.send(404, "text/html", message);
+  //Serial.println(message);
+}
+
+void handleReboot() {
+  headlightReboot = 1;
+  httpServer.send(200, "text/plain", "ok");
 }
 
 void startServer() {
-  httpUpdater.setup(&httpServer);
+  hexcolor = 0;
+  httpUpdater.setup(&httpServer, "/update", UPDATE_USR, UPDATE_KEY);
   httpServer.on("/", handleRoot);
+  httpServer.on("/gay", handleGayCorner);
   httpServer.on("/help", handleHelpMenu);
+  httpServer.on("/reboot", handleReboot);
   httpServer.on("/setrgb", handleColorRGB);
   httpServer.on("/sethex", handleColorHEX);
-  httpServer.on("/gay", handleGayCorner);
   httpServer.onNotFound(handleNotFound);
   httpServer.begin();
-  delay(100);
-  yield();
+  delay(50);
+  MDNS.begin(WIFI_HOST_NAME);
+  delay(50);
+  MDNS.addService("http", "tcp", 80);
+  delay(50);
 }
 
 void updateServer() {
   httpServer.handleClient();
-  delay(10);
-  yield();
 }
 
 /* =========================== Server  Section ============================== */
 /* ========================== Headlight Section ============================= */
 WiFiUDP headlightClient;
-IPAddress headlightMulticast(224,0,0,0);
+IPAddress headlightMulticast(228,232,238,246);
 const unsigned int headlightPort = 23808;
 
 void startHeadlights() {
-  turning = 1;
-  hexcolor = 0;
-  haloStripShow = 0;
-  cornerStripShow = 0;
-  
-  haloStrip.Begin();
-  cornerStrip.Begin();
-  turnLightsOn();
-
   pinMode(lowPin, INPUT);
-  attachInterrupt(digitalPinToInterrupt(lowPin), lowISR, CHANGE);
   pinMode(turnPin, INPUT);
+  
+  turning = 0;
+  headlightReboot = 0;
+
+  cornerStripShow = 0;
+  cornerStrip.Begin();
   attachInterrupt(digitalPinToInterrupt(turnPin), turnISR, CHANGE);
 
-  yield();
+#ifdef HALO
+  haloStripShow = 0;
+  haloStrip.Begin();
+  attachInterrupt(digitalPinToInterrupt(lowPin), lowISR, CHANGE);
+#endif
+
   headlightClient.beginMulticast(WiFi.localIP(), headlightMulticast, headlightPort);
-  yield();
-  delay(100);
-  yield();
 }
 
 void updateHeadlights() {
-  delay(100);
-  yield();
-  delay(100);
-  yield();
   if (headlightClient.parsePacket()) {
     char colorBuffer[14];
     size_t len = headlightClient.read(colorBuffer, 14);
@@ -240,28 +256,16 @@ void updateHeadlights() {
 }
 
 /* ========================== Headlight Section ============================= */
-/* ===========================  WiFi  Section  ============================== */
-
-void startWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.hostname(WIFI_HOST_NAME);
-  WiFi.setPhyMode(WIFI_PHY_MODE_11G);
-  WiFi.setOutputPower(20);               // transmission power range 0 to +20.5 dBm
-  WiFi.setSleepMode(WIFI_LIGHT_SLEEP);  // sets MCU & Radio to sleep mode when idle
-  WiFi.begin(WIFI_SSID, WIFI_KEY);
-  delay(500);
-  yield();
-}
-
-/* ===========================  WiFi  Section  ============================== */
 /* ===========================  Main  Section  ============================== */
 void setup() {
+  while(!WiFi.mode(WIFI_STA));
+  while(!WiFi.setPhyMode(WIFI_PHY_MODE_11B));
+  WiFi.setOutputPower(20.5);
   delay(100);
-  yield();
+  WiFi.hostname(WIFI_HOST_NAME);
+  WiFi.begin(WIFI_SSID, WIFI_KEY);
   delay(100);
-  yield();
-  startWiFi();
-  startServer();        // start HTTPWebServer 
+  startServer();        // start HTTPWebServer
   startHeadlights();    // turn on lights & start UDP listener
 }
 
@@ -270,18 +274,34 @@ void loop() {
     if (millis() > turning) {
       turning = 0;
       turnLightsOn();
+      yield();
     }
   }
-  if (haloStripShow) {
-    haloStrip.Show();
-    haloStripShow = 0;
-  }
+
   if (cornerStripShow) {
     cornerStrip.Show();
     cornerStripShow = 0;
+    yield();
   }
+
+#ifdef HALO
+  if (haloStripShow) {
+    haloStrip.Show();
+    haloStripShow = 0;
+    yield();
+  }
+#endif
+
   updateServer();
   updateHeadlights();
+
+  if (headlightReboot) {
+    delay(250);
+    delay(250);
+    ESP.restart();
+  }
+
+  delay(15);
 }
 /* ===========================  Main  Section  ============================== */
 

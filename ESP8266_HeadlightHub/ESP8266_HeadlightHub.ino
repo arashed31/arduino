@@ -4,16 +4,18 @@
 #include <ESP8266HTTPUpdateServer.h>
 #include <Ticker.h>
 #include "wifi.h"
+extern "C" {
+#include "user_interface.h"
+}
 
 /* ============================ WiFi  Section =============================== */
 void startWiFi() {
   //WiFi.mode(WIFI_STA);
-  WiFi.mode(WIFI_AP);
+  while(!WiFi.mode(WIFI_AP));
+  while(!WiFi.setPhyMode(WIFI_PHY_MODE_11B));
+  WiFi.setOutputPower(20.5);
+  delay(100);
   WiFi.hostname(WIFI_HOST_NAME);
-  WiFi.setPhyMode(WIFI_PHY_MODE_11G);
-  WiFi.setOutputPower(20.5);              // transmission power range 0 to +20.5 dBm
-  WiFi.setSleepMode(WIFI_LIGHT_SLEEP);  // sets MCU & Radio to sleep mode when idle
-
   //WiFi.begin(WIFI_SSID, WIFI_KEY);
   WiFi.softAP(WIFI_SSID, WIFI_KEY, 1, 1); //create hidden network
 }
@@ -25,6 +27,11 @@ ESP8266HTTPUpdateServer httpUpdater;
 
 volatile uint32_t hexcolor;
 volatile int headlightShow, httpRespond;
+
+String STA_CLIENTS;
+struct station_info *stat_info;
+struct ip_addr *IPaddress;
+IPAddress address;
 
 void handleRoot() {
   String message = WIFI_HELLO_STATEMENT;
@@ -43,6 +50,22 @@ void handleHelpMenu() {
   //Serial.print(help_menu);
 }
 
+void handleClients()
+{
+  STA_CLIENTS = "Clients:\n";
+  stat_info = wifi_softap_get_station_info();
+  while (stat_info != NULL)
+  {
+    IPaddress = &stat_info->ip;
+    address = (IPaddress->addr >> 24) & 0xff;
+    STA_CLIENTS += '\t';
+    STA_CLIENTS += address;
+    STA_CLIENTS += '\n';
+    stat_info = STAILQ_NEXT(stat_info, next);
+  }
+  httpServer.send(200, "text/plain", STA_CLIENTS);
+}
+
 void handleColorRGB() {
   uint32_t r = httpServer.arg("r").toInt();
   uint32_t g = httpServer.arg("g").toInt();
@@ -50,7 +73,7 @@ void handleColorRGB() {
 
   hexcolor = (r << 16) | (g << 8) | (b);
   headlightShow = 1;
-  httpRespond = 1;
+  httpServer.send(200, "text/plain", "OK");
   //Serial.println(hexcolor,HEX);
 }
 
@@ -60,7 +83,7 @@ void handleColorHEX() {
 
   hexcolor = strtol(colorBuffer, NULL, 16);
   headlightShow = 1;
-  httpRespond = 1;
+  httpServer.send(200, "text/plain", "OK");
   //Serial.println(hexcolor,HEX);
 }
 
@@ -82,10 +105,11 @@ void handleNotFound() {
 
 void startServer() {
   httpRespond = 0;
-  httpUpdater.setup(&httpServer);
+  httpUpdater.setup(&httpServer, "/update", UPDATE_USR, UPDATE_KEY);
   httpServer.on("/", handleRoot);
   httpServer.on("/favicon.ico", [](){ httpServer.send(404, "text/plain", ""); });
   httpServer.on("/help", handleHelpMenu);
+  httpServer.on("/clients", handleClients);
   httpServer.on("/setrgb", handleColorRGB);
   httpServer.on("/sethex", handleColorHEX);
   httpServer.onNotFound(handleNotFound);
@@ -93,47 +117,30 @@ void startServer() {
 }
 
 void updateServer() {
-  if (httpRespond) {
-    // tell http client job is being done
-    httpServer.send(200, "text/plain", "OK");
-    httpRespond = 0;
-  }
-  yield();
-  delay(10);
   httpServer.handleClient();
-  yield();
-  delay(10);
 }
 
 /* =========================== Server  Section ============================== */
 /* ========================== Headlight Section ============================= */
 WiFiUDP headlightServer;
-IPAddress headlightMulticast(224,0,0,0);
+IPAddress headlightMulticast(228,232,238,246);
 const unsigned int headlightPort = 23808;
 
 void startHeadlights() {
-  //headlightServer.beginMulticast(WiFi.softAPIP(), headlightMulticast, headlightPort);
+  headlightServer.beginMulticast(WiFi.softAPIP(), headlightMulticast, headlightPort);
 }
 
 void updateHeadlights() {
   if (headlightShow) {
-    char sbuf[16];
-    size_t len = sprintf(sbuf, "0x%08X_", hexcolor) + 1;
-    yield();
-    headlightServer.beginPacketMulticast(headlightMulticast, headlightPort, WiFi.softAPIP());
-    yield();
-    headlightServer.write(sbuf, len);
-    yield();
-    headlightServer.endPacket();
-    yield();
     delay(200);
-    yield();
+    char sbuf[16];
+    size_t len = sprintf(sbuf, "0x%08X_\0", hexcolor) + 1;
+    headlightServer.beginPacketMulticast(headlightMulticast, headlightPort, WiFi.softAPIP());
+    headlightServer.write(sbuf, len);
+    headlightServer.endPacket();
     delay(200);
     if (headlightShow++ == 3)
       headlightShow = 0;
-  } else {
-    yield();
-    delay(10);
   }
 }
 
@@ -144,15 +151,10 @@ volatile unsigned long heartbeat;
 void doHeartbeat() {
   if (millis() > heartbeat) {
     char sbuf[4] = "hey";
-    yield();
     headlightServer.beginPacketMulticast(headlightMulticast, headlightPort, WiFi.softAPIP());
-    yield();
     headlightServer.write(sbuf, 4);
-    yield();
     headlightServer.endPacket();
-    yield();
     heartbeat = millis() + 48000;
-    yield();
   }
 }
 
@@ -163,22 +165,21 @@ void setup() {
   startHeadlights();  // start nothing
   startServer();      // start http server
   heartbeat = millis() + 60000;
-  
+
   pinMode(0, OUTPUT);
   pinMode(1, OUTPUT);
   pinMode(2, OUTPUT);
-  pinMode(3, OUTPUT);
+  pinMode(3, INPUT);
   digitalWrite(0, LOW);
-  digitalWrite(1, HIGH);
+  digitalWrite(1, LOW);
   digitalWrite(2, LOW);
-  digitalWrite(3, LOW);
 }
 
 void loop() {
   updateServer();
   updateHeadlights();
-  doHeartbeat();
-  delay(10);
+  //doHeartbeat();
+  delay(100);
 }
 
 /* ============================ Main  Section =============================== */
